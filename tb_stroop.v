@@ -27,6 +27,8 @@ module tb_stroop;
 
     reg reset = 1;
     reg btnc=0, btnu=0, btnr=0, btnd=0, btnl=0;
+    reg [1:0] sw = 2'b00;     // sw[1]=0 -> classic mode (matches the
+                              // original 12 assertions); sw[0] reserved.
 
     // ---------------- DUT instances ----------------
     wire        lfsr_sample;
@@ -43,11 +45,16 @@ module tb_stroop;
     wire [15:0] score_val, react_time_ms;
     wire [1:0]  cur_word, cur_color;
     wire        results_ready;
+    // New stat outputs (observed but not asserted on by the original 12).
+    wire [15:0] best_rt, worst_rt, avg_rt;
+    wire [15:0] cur_timeout_ms, min_timeout_ms;
+    wire        adaptive_mode;
 
     stroop_fsm dut (
         .clk(clk), .reset(reset),
         .btnc_p(btnc), .btnu_p(btnu), .btnr_p(btnr),
         .btnd_p(btnd), .btnl_p(btnl),
+        .sw(sw),
         .lfsr_sample(lfsr_sample),
         .word_idx(word_idx), .color_idx(color_idx),
         .st_idle(st_idle), .st_show(st_show), .st_wait(st_wait),
@@ -55,7 +62,10 @@ module tb_stroop;
         .round_num(round_num), .score_val(score_val),
         .react_time_ms(react_time_ms),
         .cur_word(cur_word), .cur_color(cur_color),
-        .results_ready(results_ready)
+        .results_ready(results_ready),
+        .best_rt(best_rt), .worst_rt(worst_rt), .avg_rt(avg_rt),
+        .cur_timeout_ms(cur_timeout_ms), .min_timeout_ms(min_timeout_ms),
+        .adaptive_mode(adaptive_mode)
     );
 
     // ---------------- Helpers ----------------

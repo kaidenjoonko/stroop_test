@@ -6,6 +6,7 @@
 // Pin summary (see nexys_a7.xdc for the constraints):
 //   clk       : 100 MHz crystal (E3)
 //   reset     : SW0 (active high)  - synchronous reset to all submodules
+//   sw[1:0]   : two slide switches  -- sw[1]=adaptive mode, sw[0]=reserved
 //   btnc      : center pushbutton (start/confirm)
 //   btnu      : up    pushbutton (RED)
 //   btnr      : right pushbutton (GREEN)
@@ -24,6 +25,7 @@
 module top (
     input  wire        clk,        // 100 MHz
     input  wire        reset,      // SW0
+    input  wire [1:0]  sw,         // SW1 (mode), SW2 (reserved)
     input  wire        btnc,
     input  wire        btnu,
     input  wire        btnr,
@@ -50,6 +52,15 @@ module top (
         rst_s1 <= rst_s0;
     end
     wire rst = rst_s1;
+
+    // Two-flop synchronizer for the slide switches as well -- they're
+    // mechanical, asynchronous, and feed combinational paths in the FSM.
+    reg [1:0] sw_s0, sw_s1;
+    always @(posedge clk) begin
+        sw_s0 <= sw;
+        sw_s1 <= sw_s0;
+    end
+    wire [1:0] sw_sync = sw_s1;
 
     // ============================================================
     // 2. Debounce + edge-detect all five pushbuttons
@@ -87,6 +98,9 @@ module top (
     wire [15:0] score_val, react_time_ms;
     wire [1:0]  cur_word, cur_color;
     wire        results_ready;
+    wire [15:0] best_rt, worst_rt, avg_rt;
+    wire [15:0] cur_timeout_ms, min_timeout_ms;
+    wire        adaptive_mode;
 
     stroop_fsm u_fsm (
         .clk           (clk),
@@ -96,6 +110,7 @@ module top (
         .btnr_p        (btnr_p),
         .btnd_p        (btnd_p),
         .btnl_p        (btnl_p),
+        .sw            (sw_sync),
         .lfsr_sample   (lfsr_sample),
         .word_idx      (word_idx),
         .color_idx     (color_idx),
@@ -110,7 +125,13 @@ module top (
         .react_time_ms (react_time_ms),
         .cur_word      (cur_word),
         .cur_color     (cur_color),
-        .results_ready (results_ready)
+        .results_ready (results_ready),
+        .best_rt       (best_rt),
+        .worst_rt      (worst_rt),
+        .avg_rt        (avg_rt),
+        .cur_timeout_ms(cur_timeout_ms),
+        .min_timeout_ms(min_timeout_ms),
+        .adaptive_mode (adaptive_mode)
     );
 
     // ============================================================
@@ -153,6 +174,12 @@ module top (
         .score_val     (score_val),
         .react_time_ms (react_time_ms),
         .results_ready (results_ready),
+        .best_rt       (best_rt),
+        .worst_rt      (worst_rt),
+        .avg_rt        (avg_rt),
+        .cur_timeout_ms(cur_timeout_ms),
+        .min_timeout_ms(min_timeout_ms),
+        .adaptive_mode (adaptive_mode),
         .rgb           (rgb)
     );
 

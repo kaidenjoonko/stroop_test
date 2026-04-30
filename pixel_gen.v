@@ -2,33 +2,58 @@
 // pixel_gen.v
 //------------------------------------------------------------------------------
 // Composes the VGA pixel stream depending on the current FSM state and game
-// data. Renders four distinct screens:
+// data. Renders five distinct screens:
 //
-//   1) IDLE / Title      -- "STROOP TEST" + "PRESS BTNC TO START"
-//                           OR results screen if results_ready==1
-//   2) SHOW_WORD/WAIT    -- the trial: big color word in mismatched ink color
-//                           plus a countdown timer bar at the bottom and the
-//                           current score in the corner.
-//   3) CORRECT/INCORRECT -- giant check or X plus the reaction time in ms.
-//   4) (results)         -- handled in IDLE branch when results_ready==1.
+//   1) IDLE / Title (results_ready=0)  -- multi-line instructions:
+//                           BIG  "STROOP TEST"  (y=60)
+//                           sm   "IDENTIFY THE INK COLOR"  (y=140)
+//                           sm   "NOT THE WORD"            (y=180)
+//                           sm   "BTNU : RED  BTNR : GREEN"  (y=240)
+//                           sm   "BTND : BLUE  BTNL : YELLOW"(y=280)
+//                           sm   "SW1 UP : ADAPTIVE MODE"   (y=340)
+//                           sm   "PRESS BTNC TO START"      (y=400)
+//   2) IDLE / Results (results_ready=1) -- session statistics:
+//                           BIG  "RESULTS"      (y=60)
+//                           sm   SCORE / TRIALS line          (y=160)
+//                           sm   AVG TIME line                (y=200)
+//                           sm   BEST TIME line               (y=240)
+//                           sm   WORST TIME line              (y=280)
+//                           sm   MIN TIMEOUT line (adaptive)  (y=320)
+//                           sm   "PRESS BTNC TO RESTART"      (y=400)
+//   3) SHOW_WORD/WAIT     -- trial:
+//                           BIG  word (mismatched ink)   (y=200)
+//                           sm   "ROUND NN/20" or "/30"  top-left (y=20)
+//                           sm   "TIMEOUT: NNNNMS"       top-right (y=20)
+//   4) CORRECT            -- giant green check + reaction time
+//   5) INCORRECT          -- giant red X    + reaction time
 //
 // All glyphs use a SCALE factor so the 8x16 source font is enlarged uniformly.
-// Characters are positioned by computing the (x,y) origin for each glyph and
-// then asking the font ROM whether the current pixel is inside that glyph.
+// SCALE=4 -> 32x64 ("BIG" strings).  SCALE=2 -> 16x32 ("small" strings).
 //
-// Performance:
-//   - The font ROM has a one-cycle latency. We register the pixel coordinate
-//     and the requested character one cycle ahead so the ROM data lines up
-//     with the pixel being drawn. This is implemented by computing addresses
-//     in the same cycle as we use them, accepting one pixel of horizontal
-//     latency (invisible to the user).
+// Multi-line screens are realized with a single big-string slot and a single
+// small-string slot whose origin/length/character lookup are selected from a
+// chain of py-zone (and occasionally px-zone) comparators inside the layout
+// always block. Only one zone fires per pixel, so the whole screen still
+// renders with one big_char_lut and one sm_char_lut.
+//
+// Performance / timing fix:
+//   The combinational divide-by-1000/100/10 chains for the BCD breakouts
+//   (sc_d3..d0, rt_d3..d0, avg, best, worst, cur_timeout, min_timeout) used
+//   to be a single 16-bit value -> ~3 chained dividers in the same cycle,
+//   with the result feeding the case statement that drives the font ROM
+//   address. That was the WNS=-2.27 ns critical path. We now register the
+//   16-bit input first (one cycle), then register the four BCD digits
+//   (a second cycle), then use the registered digits in the layout block.
+//   Total latency from FSM update to glyph: 2 clocks (~20 ns) -- invisible
+//   at 60 Hz refresh.
 //
 // Color encoding (12-bit RGB, 4 bits/channel):
 //   RED    = 12'hF00
-//   GREEN  = 12'h2C5  (slightly muted, looks more like the screenshot)
-//   BLUE   = 12'h35F  (a brighter, friendlier blue)
+//   GREEN  = 12'h2C5
+//   BLUE   = 12'h35F
 //   YELLOW = 12'hFC0
 //   WHITE  = 12'hFFF
+//   GREY   = 12'h888
 //   BLACK  = 12'h000  (background)
 //==============================================================================
 
@@ -52,10 +77,18 @@ module pixel_gen (
     // Game data
     input  wire [1:0]  cur_word,        // 0=RED 1=GREEN 2=BLUE 3=YELLOW
     input  wire [1:0]  cur_color,
-    input  wire [4:0]  round_num,       // 0..20
+    input  wire [4:0]  round_num,       // 0..29 (adaptive) or 0..19 (classic)
     input  wire [15:0] score_val,
     input  wire [15:0] react_time_ms,
     input  wire        results_ready,
+
+    // New: per-session stats and adaptive mode
+    input  wire [15:0] best_rt,         // sentinel 16'hFFFF if no data
+    input  wire [15:0] worst_rt,
+    input  wire [15:0] avg_rt,
+    input  wire [15:0] cur_timeout_ms,
+    input  wire [15:0] min_timeout_ms,
+    input  wire        adaptive_mode,
 
     output reg  [11:0] rgb              // 12-bit color out
 );
@@ -106,20 +139,6 @@ module pixel_gen (
     reg [11:0] bg_col_d1;  // background color at this pixel
     reg        in_glyph_d1; // 1 if this pixel falls inside any glyph cell
 
-    // ---------------- Helper: render N-character string at (ox, oy) -------------
-    // We can't use loops in synth-friendly Verilog elegantly here, so each
-    // screen has explicit per-character logic. We define a single "scaled
-    // character cell" of CW pixels x CH pixels (CW=8*scale, CH=16*scale).
-    //
-    // For a given (px, py) we ask: is it inside cell i of a string starting
-    // at (ox, oy)? If yes, we know the cell index, the column within the
-    // cell, and the row within the cell. We then map cell index -> char code.
-    //
-    // To keep the file readable, the per-screen logic computes a few useful
-    // intermediate signals: target_char, target_row, target_col, fg, bg,
-    // and in_glyph. These are then registered into rom_char/rom_row plus
-    // the *_d1 pipeline registers.
-
     // ---------------- Default values for outputs ----------------
     reg [5:0]  target_char;
     reg [3:0]  target_row;
@@ -153,20 +172,69 @@ module pixel_gen (
         end
     endfunction
 
-    // ---------------- BCD breakouts for score and reaction time ----------------
-    wire [3:0] sc_d3 = (score_val/1000)%10;
-    wire [3:0] sc_d2 = (score_val/100) %10;
-    wire [3:0] sc_d1 = (score_val/10)  %10;
-    wire [3:0] sc_d0 =  score_val      %10;
+    // ===================================================================
+    //               BCD pipelining (timing-fix Option A)
+    // ===================================================================
+    // Stage 1: register the 16-bit data values. Stage 2: register the four
+    // /1000, /100, /10, %10 results. Each %10 //10 path is then a short
+    // combinational hop between two flip-flops, well under 10 ns.
+    //
+    // Note: best_rt may be its 'no-data' sentinel 16'hFFFF; we substitute 0
+    // at the input register so the BCD digits show 0000 rather than 6553.
 
-    wire [3:0] rt_d3 = (react_time_ms/1000)%10;
-    wire [3:0] rt_d2 = (react_time_ms/100) %10;
-    wire [3:0] rt_d1 = (react_time_ms/10)  %10;
-    wire [3:0] rt_d0 =  react_time_ms      %10;
+    reg [15:0] score_q,  react_q,  avg_q,  best_q,  worst_q,  ctmo_q,  mtmo_q;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            score_q  <= 16'd0;
+            react_q  <= 16'd0;
+            avg_q    <= 16'd0;
+            best_q   <= 16'd0;
+            worst_q  <= 16'd0;
+            ctmo_q   <= 16'd0;
+            mtmo_q   <= 16'd0;
+        end else begin
+            score_q  <= score_val;
+            react_q  <= react_time_ms;
+            avg_q    <= avg_rt;
+            best_q   <= (best_rt == 16'hFFFF) ? 16'd0 : best_rt;
+            worst_q  <= worst_rt;
+            ctmo_q   <= cur_timeout_ms;
+            mtmo_q   <= min_timeout_ms;
+        end
+    end
+
+    reg [3:0] sc_d3, sc_d2, sc_d1, sc_d0;
+    reg [3:0] rt_d3, rt_d2, rt_d1, rt_d0;
+    reg [3:0] av_d3, av_d2, av_d1, av_d0;
+    reg [3:0] be_d3, be_d2, be_d1, be_d0;
+    reg [3:0] wo_d3, wo_d2, wo_d1, wo_d0;
+    reg [3:0] ct_d3, ct_d2, ct_d1, ct_d0;
+    reg [3:0] mt_d3, mt_d2, mt_d1, mt_d0;
+
+    always @(posedge clk) begin
+        sc_d3 <= (score_q/1000)%10;  sc_d2 <= (score_q/100)%10;
+        sc_d1 <= (score_q/10)%10;    sc_d0 <=  score_q%10;
+        rt_d3 <= (react_q/1000)%10;  rt_d2 <= (react_q/100)%10;
+        rt_d1 <= (react_q/10)%10;    rt_d0 <=  react_q%10;
+        av_d3 <= (avg_q/1000)%10;    av_d2 <= (avg_q/100)%10;
+        av_d1 <= (avg_q/10)%10;      av_d0 <=  avg_q%10;
+        be_d3 <= (best_q/1000)%10;   be_d2 <= (best_q/100)%10;
+        be_d1 <= (best_q/10)%10;     be_d0 <=  best_q%10;
+        wo_d3 <= (worst_q/1000)%10;  wo_d2 <= (worst_q/100)%10;
+        wo_d1 <= (worst_q/10)%10;    wo_d0 <=  worst_q%10;
+        ct_d3 <= (ctmo_q/1000)%10;   ct_d2 <= (ctmo_q/100)%10;
+        ct_d1 <= (ctmo_q/10)%10;     ct_d0 <=  ctmo_q%10;
+        mt_d3 <= (mtmo_q/1000)%10;   mt_d2 <= (mtmo_q/100)%10;
+        mt_d1 <= (mtmo_q/10)%10;     mt_d0 <=  mtmo_q%10;
+    end
+
+    // round_num+1 BCD: small enough to leave combinational
+    wire [5:0] rn_p1   = {1'b0, round_num} + 6'd1;     // 1..30
+    wire [3:0] rn_d1   = (rn_p1/10)%10;
+    wire [3:0] rn_d0   =  rn_p1%10;
 
     // ---------------- Word-text helper ----------------
-    // Given a 2-bit word index and a character position 0..5, return the
-    // character code for that letter (or SPACE beyond the word's length).
     function [5:0] word_letter;
         input [1:0] w;
         input [2:0] idx;     // 0..5
@@ -224,66 +292,48 @@ module pixel_gen (
     // ===================================================================
     //                    MAIN COMBINATIONAL DRAW LOGIC
     // ===================================================================
-    // We compute "what character (if any) is at this pixel?" for each screen.
-    // Resolution: 640 wide, 480 tall. We use SCALE=4 mainly (8*4=32 wide,
-    // 16*4=64 tall per glyph) for the BIG word/digit displays, and SCALE=2
-    // (16x32) for normal text rows.
-
-    integer i;       // generic loop var, only used in always @(*) for codegen
 
     // Local pixel coords
     wire [9:0] px = hcount;
     wire [9:0] py = vcount;
 
     // ---------- Big rendering (scale 4): 32x64 per char ----------
-    // Layout the title or trial word horizontally centered at vertical row Y0.
-    // For up to N chars, total width = N * 32. We pick the origin so the
-    // string is centered around x = 320.
+    reg [9:0]  big_ox;
+    reg [9:0]  big_oy;
+    reg [4:0]  big_nchars;
+    reg [11:0] big_color;
+    reg        big_active;
 
-    // We compute these for whichever screen is active.
-    reg [9:0]  big_ox;        // string origin X (top-left of leftmost char)
-    reg [9:0]  big_oy;        // string origin Y
-    reg [3:0]  big_nchars;    // number of chars in the string
-    reg [11:0] big_color;     // foreground color
-    reg        big_active;    // 1 if the big string is being drawn this state
-
-    // For each screen we will populate big_* and then a uniform inner block
-    // tests whether (px,py) lies inside that string and, if so, picks the
-    // character code from a per-screen helper.
-
-    // ------------- small string (scale 2): 16x32 per char --------------
-    // Used for "PRESS BTNC TO START", score readout, "ROUND XX/20", etc.
+    // ---------- small string (scale 2): 16x32 per char ----------
     reg [9:0]  sm_ox, sm_oy;
-    reg [3:0]  sm_nchars;
+    reg [4:0]  sm_nchars;
     reg [11:0] sm_color;
     reg        sm_active;
 
-    // Per-cell character lookups for big and small strings: each screen
-    // implements `big_char(idx)` and `sm_char(idx)` via a case below.
+    // Per-cell character lookups
     reg [5:0] big_char_lut;
     reg [5:0] sm_char_lut;
 
-    // Index of the cell (0..N-1) that the current pixel falls into, plus
-    // the column/row within that 32x64 (or 16x32) cell.
-    reg [3:0] big_cell;
+    // Index of the cell + col/row within cell
+    reg [4:0] big_cell;
     reg [4:0] big_col_in_cell;   // 0..31
     reg [5:0] big_row_in_cell;   // 0..63
-    reg [3:0] sm_cell;
+    reg [4:0] sm_cell;
     reg [3:0] sm_col_in_cell;    // 0..15
     reg [4:0] sm_row_in_cell;    // 0..31
 
     reg in_big, in_sm;
 
     // Compute "in big string?" and indices.
+    // big_nchars*32 max = 31*32 = 992; subtract is on 10-bit px.
     always @(*) begin
         in_big = 1'b0;
-        big_cell        = 4'd0;
+        big_cell        = 5'd0;
         big_col_in_cell = 5'd0;
         big_row_in_cell = 6'd0;
         if (big_active) begin
             if ((px >= big_ox) && (py >= big_oy) &&
                 (py <  big_oy + 64)) begin
-                // Width of full string is big_nchars * 32
                 if (px < big_ox + (big_nchars * 32)) begin
                     in_big          = 1'b1;
                     big_cell        = (px - big_ox) >> 5;     // /32
@@ -296,7 +346,7 @@ module pixel_gen (
 
     always @(*) begin
         in_sm = 1'b0;
-        sm_cell        = 4'd0;
+        sm_cell        = 5'd0;
         sm_col_in_cell = 4'd0;
         sm_row_in_cell = 5'd0;
         if (sm_active) begin
@@ -313,194 +363,578 @@ module pixel_gen (
     end
 
     // ---------------- Per-state screen layout ----------------
-    // We populate big_* and sm_* and big_char_lut/sm_char_lut here.
 
-    // Determine which "BIG" string and "SMALL" string to draw and their cells.
     always @(*) begin
         // defaults: nothing
         big_active   = 1'b0;
         big_ox       = 10'd0;
         big_oy       = 10'd0;
-        big_nchars   = 4'd0;
+        big_nchars   = 5'd0;
         big_color    = C_WHITE;
         big_char_lut = CH_SPACE;
 
         sm_active    = 1'b0;
         sm_ox        = 10'd0;
         sm_oy        = 10'd0;
-        sm_nchars    = 4'd0;
+        sm_nchars    = 5'd0;
         sm_color     = C_GREY;
         sm_char_lut  = CH_SPACE;
 
-        // ------------- IDLE: title screen OR results screen -------------
+        // ===================================================================
+        // IDLE: title screen OR results screen
+        // ===================================================================
         if (st_idle) begin
             if (results_ready) begin
-                // Big: "SCORE XX/20" centered. We use 8 chars: "SCORE NN/20"
-                //  => 'S','C','O','R','E',' ',d1,d0,'/','2','0'  = 11 chars
+                // ---- RESULTS SCREEN ----
+                // BIG "RESULTS" header (7 chars)
                 big_active = 1'b1;
-                big_nchars = 4'd11;
-                big_ox     = 10'd320 - (11*32)/2;   // center: 320 - 176 = 144
-                big_oy     = 10'd200;
+                big_nchars = 5'd7;
+                big_ox     = 10'd320 - (7*32)/2;   // 320-112 = 208
+                big_oy     = 10'd60;
                 big_color  = C_YELLOW;
                 case (big_cell)
-                    4'd0: big_char_lut = CH_S;
-                    4'd1: big_char_lut = CH_C;
-                    4'd2: big_char_lut = CH_O;
-                    4'd3: big_char_lut = CH_R;
-                    4'd4: big_char_lut = CH_E;
-                    4'd5: big_char_lut = CH_SPACE;
-                    4'd6: big_char_lut = bcd_char(sc_d1);
-                    4'd7: big_char_lut = bcd_char(sc_d0);
-                    4'd8: big_char_lut = CH_SLASH;
-                    4'd9: big_char_lut = CH_2;
-                    4'd10: big_char_lut = CH_0;
+                    5'd0: big_char_lut = CH_R;
+                    5'd1: big_char_lut = CH_E;
+                    5'd2: big_char_lut = CH_S;
+                    5'd3: big_char_lut = CH_U;
+                    5'd4: big_char_lut = CH_L;
+                    5'd5: big_char_lut = CH_T;
+                    5'd6: big_char_lut = CH_S;
                     default: big_char_lut = CH_SPACE;
                 endcase
 
-                // Small: "PRESS BTNC TO RESTART" -- 21 chars
-                sm_active = 1'b1;
-                sm_nchars = 4'd14;
-                sm_ox     = 10'd320 - (14*16)/2;
-                sm_oy     = 10'd320;
-                sm_color  = C_WHITE;
-                case (sm_cell)
-                    4'd0: sm_char_lut = CH_P;
-                    4'd1: sm_char_lut = CH_R;
-                    4'd2: sm_char_lut = CH_E;
-                    4'd3: sm_char_lut = CH_S;
-                    4'd4: sm_char_lut = CH_S;
-                    4'd5: sm_char_lut = CH_SPACE;
-                    4'd6: sm_char_lut = CH_T;
-                    4'd7: sm_char_lut = CH_O;
-                    4'd8: sm_char_lut = CH_SPACE;
-                    4'd9: sm_char_lut = CH_R;
-                    4'd10: sm_char_lut = CH_E;
-                    4'd11: sm_char_lut = CH_T;
-                    4'd12: sm_char_lut = CH_R;
-                    4'd13: sm_char_lut = CH_Y;
-                    default: sm_char_lut = CH_SPACE;
-                endcase
+                // ---- Stats lines (py-zone dispatch) ----
+
+                // Line 1 @ y=160:  "SCORE: NN/20"  (classic) or "TRIALS: NN" (adaptive)
+                if (py >= 10'd160 && py < 10'd192) begin
+                    sm_active = 1'b1;
+                    sm_oy     = 10'd160;
+                    sm_color  = C_WHITE;
+                    if (adaptive_mode) begin
+                        // "TRIALS: NN" - 10 chars
+                        sm_nchars = 5'd10;
+                        sm_ox     = 10'd320 - (10*16)/2;   // 240
+                        case (sm_cell)
+                            5'd0: sm_char_lut = CH_T;
+                            5'd1: sm_char_lut = CH_R;
+                            5'd2: sm_char_lut = CH_I;
+                            5'd3: sm_char_lut = CH_A;
+                            5'd4: sm_char_lut = CH_L;
+                            5'd5: sm_char_lut = CH_S;
+                            5'd6: sm_char_lut = CH_COLON;
+                            5'd7: sm_char_lut = CH_SPACE;
+                            5'd8: sm_char_lut = bcd_char(sc_d1);
+                            5'd9: sm_char_lut = bcd_char(sc_d0);
+                            default: sm_char_lut = CH_SPACE;
+                        endcase
+                    end else begin
+                        // "SCORE: NN/20" - 12 chars
+                        sm_nchars = 5'd12;
+                        sm_ox     = 10'd320 - (12*16)/2;   // 224
+                        case (sm_cell)
+                            5'd0:  sm_char_lut = CH_S;
+                            5'd1:  sm_char_lut = CH_C;
+                            5'd2:  sm_char_lut = CH_O;
+                            5'd3:  sm_char_lut = CH_R;
+                            5'd4:  sm_char_lut = CH_E;
+                            5'd5:  sm_char_lut = CH_COLON;
+                            5'd6:  sm_char_lut = CH_SPACE;
+                            5'd7:  sm_char_lut = bcd_char(sc_d1);
+                            5'd8:  sm_char_lut = bcd_char(sc_d0);
+                            5'd9:  sm_char_lut = CH_SLASH;
+                            5'd10: sm_char_lut = CH_2;
+                            5'd11: sm_char_lut = CH_0;
+                            default: sm_char_lut = CH_SPACE;
+                        endcase
+                    end
+                end
+
+                // Line 2 @ y=200:  "AVG TIME: NNNNMS"  (16 chars)
+                else if (py >= 10'd200 && py < 10'd232) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd16;
+                    sm_oy     = 10'd200;
+                    sm_ox     = 10'd320 - (16*16)/2;       // 192
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_A;
+                        5'd1:  sm_char_lut = CH_V;
+                        5'd2:  sm_char_lut = CH_G;
+                        5'd3:  sm_char_lut = CH_SPACE;
+                        5'd4:  sm_char_lut = CH_T;
+                        5'd5:  sm_char_lut = CH_I;
+                        5'd6:  sm_char_lut = CH_M;
+                        5'd7:  sm_char_lut = CH_E;
+                        5'd8:  sm_char_lut = CH_COLON;
+                        5'd9:  sm_char_lut = CH_SPACE;
+                        5'd10: sm_char_lut = bcd_char(av_d3);
+                        5'd11: sm_char_lut = bcd_char(av_d2);
+                        5'd12: sm_char_lut = bcd_char(av_d1);
+                        5'd13: sm_char_lut = bcd_char(av_d0);
+                        5'd14: sm_char_lut = CH_M;
+                        5'd15: sm_char_lut = CH_S;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // Line 3 @ y=240:  "BEST TIME: NNNNMS"  (17 chars)
+                else if (py >= 10'd240 && py < 10'd272) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd17;
+                    sm_oy     = 10'd240;
+                    sm_ox     = 10'd320 - (17*16)/2;       // 184
+                    sm_color  = C_GREEN;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_B;
+                        5'd1:  sm_char_lut = CH_E;
+                        5'd2:  sm_char_lut = CH_S;
+                        5'd3:  sm_char_lut = CH_T;
+                        5'd4:  sm_char_lut = CH_SPACE;
+                        5'd5:  sm_char_lut = CH_T;
+                        5'd6:  sm_char_lut = CH_I;
+                        5'd7:  sm_char_lut = CH_M;
+                        5'd8:  sm_char_lut = CH_E;
+                        5'd9:  sm_char_lut = CH_COLON;
+                        5'd10: sm_char_lut = CH_SPACE;
+                        5'd11: sm_char_lut = bcd_char(be_d3);
+                        5'd12: sm_char_lut = bcd_char(be_d2);
+                        5'd13: sm_char_lut = bcd_char(be_d1);
+                        5'd14: sm_char_lut = bcd_char(be_d0);
+                        5'd15: sm_char_lut = CH_M;
+                        5'd16: sm_char_lut = CH_S;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // Line 4 @ y=280:  "WORST TIME: NNNNMS"  (18 chars)
+                else if (py >= 10'd280 && py < 10'd312) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd18;
+                    sm_oy     = 10'd280;
+                    sm_ox     = 10'd320 - (18*16)/2;       // 176
+                    sm_color  = C_RED;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_W;
+                        5'd1:  sm_char_lut = CH_O;
+                        5'd2:  sm_char_lut = CH_R;
+                        5'd3:  sm_char_lut = CH_S;
+                        5'd4:  sm_char_lut = CH_T;
+                        5'd5:  sm_char_lut = CH_SPACE;
+                        5'd6:  sm_char_lut = CH_T;
+                        5'd7:  sm_char_lut = CH_I;
+                        5'd8:  sm_char_lut = CH_M;
+                        5'd9:  sm_char_lut = CH_E;
+                        5'd10: sm_char_lut = CH_COLON;
+                        5'd11: sm_char_lut = CH_SPACE;
+                        5'd12: sm_char_lut = bcd_char(wo_d3);
+                        5'd13: sm_char_lut = bcd_char(wo_d2);
+                        5'd14: sm_char_lut = bcd_char(wo_d1);
+                        5'd15: sm_char_lut = bcd_char(wo_d0);
+                        5'd16: sm_char_lut = CH_M;
+                        5'd17: sm_char_lut = CH_S;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // Line 5 @ y=320:  "MIN TIMEOUT: NNNNMS"  (19 chars, adaptive only)
+                else if (adaptive_mode && py >= 10'd320 && py < 10'd352) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd19;
+                    sm_oy     = 10'd320;
+                    sm_ox     = 10'd320 - (19*16)/2;       // 168
+                    sm_color  = C_YELLOW;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_M;
+                        5'd1:  sm_char_lut = CH_I;
+                        5'd2:  sm_char_lut = CH_N;
+                        5'd3:  sm_char_lut = CH_SPACE;
+                        5'd4:  sm_char_lut = CH_T;
+                        5'd5:  sm_char_lut = CH_I;
+                        5'd6:  sm_char_lut = CH_M;
+                        5'd7:  sm_char_lut = CH_E;
+                        5'd8:  sm_char_lut = CH_O;
+                        5'd9:  sm_char_lut = CH_U;
+                        5'd10: sm_char_lut = CH_T;
+                        5'd11: sm_char_lut = CH_COLON;
+                        5'd12: sm_char_lut = CH_SPACE;
+                        5'd13: sm_char_lut = bcd_char(mt_d3);
+                        5'd14: sm_char_lut = bcd_char(mt_d2);
+                        5'd15: sm_char_lut = bcd_char(mt_d1);
+                        5'd16: sm_char_lut = bcd_char(mt_d0);
+                        5'd17: sm_char_lut = CH_M;
+                        5'd18: sm_char_lut = CH_S;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // Line 6 @ y=400:  "PRESS BTNC TO RESTART"  (21 chars)
+                else if (py >= 10'd400 && py < 10'd432) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd21;
+                    sm_oy     = 10'd400;
+                    sm_ox     = 10'd320 - (21*16)/2;       // 152
+                    sm_color  = C_GREY;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_P;
+                        5'd1:  sm_char_lut = CH_R;
+                        5'd2:  sm_char_lut = CH_E;
+                        5'd3:  sm_char_lut = CH_S;
+                        5'd4:  sm_char_lut = CH_S;
+                        5'd5:  sm_char_lut = CH_SPACE;
+                        5'd6:  sm_char_lut = CH_B;
+                        5'd7:  sm_char_lut = CH_T;
+                        5'd8:  sm_char_lut = CH_N;
+                        5'd9:  sm_char_lut = CH_C;
+                        5'd10: sm_char_lut = CH_SPACE;
+                        5'd11: sm_char_lut = CH_T;
+                        5'd12: sm_char_lut = CH_O;
+                        5'd13: sm_char_lut = CH_SPACE;
+                        5'd14: sm_char_lut = CH_R;
+                        5'd15: sm_char_lut = CH_E;
+                        5'd16: sm_char_lut = CH_S;
+                        5'd17: sm_char_lut = CH_T;
+                        5'd18: sm_char_lut = CH_A;
+                        5'd19: sm_char_lut = CH_R;
+                        5'd20: sm_char_lut = CH_T;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
             end else begin
-                // Title screen: big "STROOP TEST" (11 chars), small prompt
+                // ---- TITLE / INSTRUCTIONS SCREEN ----
+
+                // BIG "STROOP TEST" header at y=60
                 big_active = 1'b1;
-                big_nchars = 4'd11;
-                big_ox     = 10'd320 - (11*32)/2;
-                big_oy     = 10'd180;
+                big_nchars = 5'd11;
+                big_ox     = 10'd320 - (11*32)/2;   // 144
+                big_oy     = 10'd60;
                 big_color  = C_WHITE;
                 case (big_cell)
-                    4'd0: big_char_lut = CH_S;
-                    4'd1: big_char_lut = CH_T;
-                    4'd2: big_char_lut = CH_R;
-                    4'd3: big_char_lut = CH_O;
-                    4'd4: big_char_lut = CH_O;
-                    4'd5: big_char_lut = CH_P;
-                    4'd6: big_char_lut = CH_SPACE;
-                    4'd7: big_char_lut = CH_T;
-                    4'd8: big_char_lut = CH_E;
-                    4'd9: big_char_lut = CH_S;
-                    4'd10: big_char_lut = CH_T;
+                    5'd0:  big_char_lut = CH_S;
+                    5'd1:  big_char_lut = CH_T;
+                    5'd2:  big_char_lut = CH_R;
+                    5'd3:  big_char_lut = CH_O;
+                    5'd4:  big_char_lut = CH_O;
+                    5'd5:  big_char_lut = CH_P;
+                    5'd6:  big_char_lut = CH_SPACE;
+                    5'd7:  big_char_lut = CH_T;
+                    5'd8:  big_char_lut = CH_E;
+                    5'd9:  big_char_lut = CH_S;
+                    5'd10: big_char_lut = CH_T;
                     default: big_char_lut = CH_SPACE;
                 endcase
 
-                // "PRESS BTNC TO START" (19 chars w/ spaces)
-                sm_active = 1'b1;
-                sm_nchars = 4'd11;
-                sm_ox     = 10'd320 - (11*16)/2;
-                sm_oy     = 10'd300;
-                sm_color  = C_GREY;
-                case (sm_cell)
-                    4'd0: sm_char_lut = CH_P;
-                    4'd1: sm_char_lut = CH_R;
-                    4'd2: sm_char_lut = CH_E;
-                    4'd3: sm_char_lut = CH_S;
-                    4'd4: sm_char_lut = CH_S;
-                    4'd5: sm_char_lut = CH_SPACE;
-                    4'd6: sm_char_lut = CH_S;
-                    4'd7: sm_char_lut = CH_T;
-                    4'd8: sm_char_lut = CH_A;
-                    4'd9: sm_char_lut = CH_R;
-                    4'd10: sm_char_lut = CH_T;
-                    default: sm_char_lut = CH_SPACE;
-                endcase
+                // Small instruction lines (py-zone dispatch)
+
+                // y=140: "IDENTIFY THE INK COLOR" (22 chars)
+                if (py >= 10'd140 && py < 10'd172) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd22;
+                    sm_oy     = 10'd140;
+                    sm_ox     = 10'd320 - (22*16)/2;       // 144
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_I;
+                        5'd1:  sm_char_lut = CH_D;
+                        5'd2:  sm_char_lut = CH_E;
+                        5'd3:  sm_char_lut = CH_N;
+                        5'd4:  sm_char_lut = CH_T;
+                        5'd5:  sm_char_lut = CH_I;
+                        5'd6:  sm_char_lut = CH_F;
+                        5'd7:  sm_char_lut = CH_Y;
+                        5'd8:  sm_char_lut = CH_SPACE;
+                        5'd9:  sm_char_lut = CH_T;
+                        5'd10: sm_char_lut = CH_H;
+                        5'd11: sm_char_lut = CH_E;
+                        5'd12: sm_char_lut = CH_SPACE;
+                        5'd13: sm_char_lut = CH_I;
+                        5'd14: sm_char_lut = CH_N;
+                        5'd15: sm_char_lut = CH_K;
+                        5'd16: sm_char_lut = CH_SPACE;
+                        5'd17: sm_char_lut = CH_C;
+                        5'd18: sm_char_lut = CH_O;
+                        5'd19: sm_char_lut = CH_L;
+                        5'd20: sm_char_lut = CH_O;
+                        5'd21: sm_char_lut = CH_R;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // y=180: "NOT THE WORD" (12 chars)
+                else if (py >= 10'd180 && py < 10'd212) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd12;
+                    sm_oy     = 10'd180;
+                    sm_ox     = 10'd320 - (12*16)/2;       // 224
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_N;
+                        5'd1:  sm_char_lut = CH_O;
+                        5'd2:  sm_char_lut = CH_T;
+                        5'd3:  sm_char_lut = CH_SPACE;
+                        5'd4:  sm_char_lut = CH_T;
+                        5'd5:  sm_char_lut = CH_H;
+                        5'd6:  sm_char_lut = CH_E;
+                        5'd7:  sm_char_lut = CH_SPACE;
+                        5'd8:  sm_char_lut = CH_W;
+                        5'd9:  sm_char_lut = CH_O;
+                        5'd10: sm_char_lut = CH_R;
+                        5'd11: sm_char_lut = CH_D;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // y=240: "BTNU : RED  BTNR : GREEN" (24 chars)
+                else if (py >= 10'd240 && py < 10'd272) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd24;
+                    sm_oy     = 10'd240;
+                    sm_ox     = 10'd320 - (24*16)/2;       // 128
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_B;
+                        5'd1:  sm_char_lut = CH_T;
+                        5'd2:  sm_char_lut = CH_N;
+                        5'd3:  sm_char_lut = CH_U;
+                        5'd4:  sm_char_lut = CH_SPACE;
+                        5'd5:  sm_char_lut = CH_COLON;
+                        5'd6:  sm_char_lut = CH_SPACE;
+                        5'd7:  sm_char_lut = CH_R;
+                        5'd8:  sm_char_lut = CH_E;
+                        5'd9:  sm_char_lut = CH_D;
+                        5'd10: sm_char_lut = CH_SPACE;
+                        5'd11: sm_char_lut = CH_SPACE;
+                        5'd12: sm_char_lut = CH_B;
+                        5'd13: sm_char_lut = CH_T;
+                        5'd14: sm_char_lut = CH_N;
+                        5'd15: sm_char_lut = CH_R;
+                        5'd16: sm_char_lut = CH_SPACE;
+                        5'd17: sm_char_lut = CH_COLON;
+                        5'd18: sm_char_lut = CH_SPACE;
+                        5'd19: sm_char_lut = CH_G;
+                        5'd20: sm_char_lut = CH_R;
+                        5'd21: sm_char_lut = CH_E;
+                        5'd22: sm_char_lut = CH_E;
+                        5'd23: sm_char_lut = CH_N;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // y=280: "BTND : BLUE  BTNL : YELLOW" (26 chars)
+                else if (py >= 10'd280 && py < 10'd312) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd26;
+                    sm_oy     = 10'd280;
+                    sm_ox     = 10'd320 - (26*16)/2;       // 112
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_B;
+                        5'd1:  sm_char_lut = CH_T;
+                        5'd2:  sm_char_lut = CH_N;
+                        5'd3:  sm_char_lut = CH_D;
+                        5'd4:  sm_char_lut = CH_SPACE;
+                        5'd5:  sm_char_lut = CH_COLON;
+                        5'd6:  sm_char_lut = CH_SPACE;
+                        5'd7:  sm_char_lut = CH_B;
+                        5'd8:  sm_char_lut = CH_L;
+                        5'd9:  sm_char_lut = CH_U;
+                        5'd10: sm_char_lut = CH_E;
+                        5'd11: sm_char_lut = CH_SPACE;
+                        5'd12: sm_char_lut = CH_SPACE;
+                        5'd13: sm_char_lut = CH_B;
+                        5'd14: sm_char_lut = CH_T;
+                        5'd15: sm_char_lut = CH_N;
+                        5'd16: sm_char_lut = CH_L;
+                        5'd17: sm_char_lut = CH_SPACE;
+                        5'd18: sm_char_lut = CH_COLON;
+                        5'd19: sm_char_lut = CH_SPACE;
+                        5'd20: sm_char_lut = CH_Y;
+                        5'd21: sm_char_lut = CH_E;
+                        5'd22: sm_char_lut = CH_L;
+                        5'd23: sm_char_lut = CH_L;
+                        5'd24: sm_char_lut = CH_O;
+                        5'd25: sm_char_lut = CH_W;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // y=340: "SW1 UP : ADAPTIVE MODE" (22 chars)
+                else if (py >= 10'd340 && py < 10'd372) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd22;
+                    sm_oy     = 10'd340;
+                    sm_ox     = 10'd320 - (22*16)/2;       // 144
+                    sm_color  = C_YELLOW;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_S;
+                        5'd1:  sm_char_lut = CH_W;
+                        5'd2:  sm_char_lut = CH_1;
+                        5'd3:  sm_char_lut = CH_SPACE;
+                        5'd4:  sm_char_lut = CH_U;
+                        5'd5:  sm_char_lut = CH_P;
+                        5'd6:  sm_char_lut = CH_SPACE;
+                        5'd7:  sm_char_lut = CH_COLON;
+                        5'd8:  sm_char_lut = CH_SPACE;
+                        5'd9:  sm_char_lut = CH_A;
+                        5'd10: sm_char_lut = CH_D;
+                        5'd11: sm_char_lut = CH_A;
+                        5'd12: sm_char_lut = CH_P;
+                        5'd13: sm_char_lut = CH_T;
+                        5'd14: sm_char_lut = CH_I;
+                        5'd15: sm_char_lut = CH_V;
+                        5'd16: sm_char_lut = CH_E;
+                        5'd17: sm_char_lut = CH_SPACE;
+                        5'd18: sm_char_lut = CH_M;
+                        5'd19: sm_char_lut = CH_O;
+                        5'd20: sm_char_lut = CH_D;
+                        5'd21: sm_char_lut = CH_E;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+
+                // y=400: "PRESS BTNC TO START" (19 chars)
+                else if (py >= 10'd400 && py < 10'd432) begin
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd19;
+                    sm_oy     = 10'd400;
+                    sm_ox     = 10'd320 - (19*16)/2;       // 168
+                    sm_color  = C_GREY;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_P;
+                        5'd1:  sm_char_lut = CH_R;
+                        5'd2:  sm_char_lut = CH_E;
+                        5'd3:  sm_char_lut = CH_S;
+                        5'd4:  sm_char_lut = CH_S;
+                        5'd5:  sm_char_lut = CH_SPACE;
+                        5'd6:  sm_char_lut = CH_B;
+                        5'd7:  sm_char_lut = CH_T;
+                        5'd8:  sm_char_lut = CH_N;
+                        5'd9:  sm_char_lut = CH_C;
+                        5'd10: sm_char_lut = CH_SPACE;
+                        5'd11: sm_char_lut = CH_T;
+                        5'd12: sm_char_lut = CH_O;
+                        5'd13: sm_char_lut = CH_SPACE;
+                        5'd14: sm_char_lut = CH_S;
+                        5'd15: sm_char_lut = CH_T;
+                        5'd16: sm_char_lut = CH_A;
+                        5'd17: sm_char_lut = CH_R;
+                        5'd18: sm_char_lut = CH_T;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
             end
         end
 
-        // ------------- SHOW_WORD or WAIT_INPUT: trial screen -------------
+        // ===================================================================
+        // SHOW_WORD or WAIT_INPUT: trial screen
+        // ===================================================================
         else if (st_show || st_wait) begin
-            // Big word in the mismatched ink color
+            // BIG word, mismatched ink color, centered at y=200
             big_active = 1'b1;
-            big_nchars = {2'd0, word_len(cur_word)};
+            big_nchars = {1'b0, word_len(cur_word)};
             big_ox     = 10'd320 - ((word_len(cur_word) * 32) >> 1);
             big_oy     = 10'd200;
             big_color  = color_of(cur_color);
             big_char_lut = word_letter(cur_word, big_cell[2:0]);
 
-            // Small status line: "ROUND NN/20" - 11 chars, top-left
-            sm_active = 1'b1;
-            sm_nchars = 4'd11;
-            sm_ox     = 10'd20;
-            sm_oy     = 10'd20;
-            sm_color  = C_WHITE;
-            case (sm_cell)
-                4'd0: sm_char_lut = CH_R;
-                4'd1: sm_char_lut = CH_O;
-                4'd2: sm_char_lut = CH_U;
-                4'd3: sm_char_lut = CH_N;
-                4'd4: sm_char_lut = CH_D;
-                4'd5: sm_char_lut = CH_SPACE;
-                4'd6: sm_char_lut = bcd_char(((round_num+1)/10) % 10);
-                4'd7: sm_char_lut = bcd_char((round_num+1) % 10);
-                4'd8: sm_char_lut = CH_SLASH;
-                4'd9: sm_char_lut = CH_2;
-                4'd10: sm_char_lut = CH_0;
-                default: sm_char_lut = CH_SPACE;
-            endcase
+            // Top bar @ y=20: ROUND on the left, TIMEOUT on the right.
+            // Both share one sm_* slot via px-zone dispatch.
+            if (py >= 10'd20 && py < 10'd52) begin
+                if (px < 10'd320) begin
+                    // "ROUND NN/20" or "ROUND NN/30" - 11 chars, top-left
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd11;
+                    sm_ox     = 10'd20;
+                    sm_oy     = 10'd20;
+                    sm_color  = C_WHITE;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_R;
+                        5'd1:  sm_char_lut = CH_O;
+                        5'd2:  sm_char_lut = CH_U;
+                        5'd3:  sm_char_lut = CH_N;
+                        5'd4:  sm_char_lut = CH_D;
+                        5'd5:  sm_char_lut = CH_SPACE;
+                        5'd6:  sm_char_lut = bcd_char(rn_d1);
+                        5'd7:  sm_char_lut = bcd_char(rn_d0);
+                        5'd8:  sm_char_lut = CH_SLASH;
+                        5'd9:  sm_char_lut = adaptive_mode ? CH_3 : CH_2;
+                        5'd10: sm_char_lut = CH_0;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end else begin
+                    // "TIMEOUT: NNNNMS" - 15 chars, top-right
+                    sm_active = 1'b1;
+                    sm_nchars = 5'd15;
+                    sm_ox     = 10'd640 - 15*16 - 10'd20;  // 380
+                    sm_oy     = 10'd20;
+                    sm_color  = adaptive_mode ? C_YELLOW : C_GREY;
+                    case (sm_cell)
+                        5'd0:  sm_char_lut = CH_T;
+                        5'd1:  sm_char_lut = CH_I;
+                        5'd2:  sm_char_lut = CH_M;
+                        5'd3:  sm_char_lut = CH_E;
+                        5'd4:  sm_char_lut = CH_O;
+                        5'd5:  sm_char_lut = CH_U;
+                        5'd6:  sm_char_lut = CH_T;
+                        5'd7:  sm_char_lut = CH_COLON;
+                        5'd8:  sm_char_lut = CH_SPACE;
+                        5'd9:  sm_char_lut = bcd_char(ct_d3);
+                        5'd10: sm_char_lut = bcd_char(ct_d2);
+                        5'd11: sm_char_lut = bcd_char(ct_d1);
+                        5'd12: sm_char_lut = bcd_char(ct_d0);
+                        5'd13: sm_char_lut = CH_M;
+                        5'd14: sm_char_lut = CH_S;
+                        default: sm_char_lut = CH_SPACE;
+                    endcase
+                end
+            end
         end
 
-        // ------------- CORRECT: green check + reaction time -------------
+        // ===================================================================
+        // CORRECT: green check + reaction time
+        // ===================================================================
         else if (st_correct) begin
-            // "✓ NNNNms" - 8 chars: check, space, d3,d2,d1,d0,'m','s'
             big_active = 1'b1;
-            big_nchars = 4'd8;
+            big_nchars = 5'd8;
             big_ox     = 10'd320 - (8*32)/2;
             big_oy     = 10'd200;
             big_color  = C_GREEN;
             case (big_cell)
-                4'd0: big_char_lut = CH_CHECK;
-                4'd1: big_char_lut = CH_SPACE;
-                4'd2: big_char_lut = bcd_char(rt_d3);
-                4'd3: big_char_lut = bcd_char(rt_d2);
-                4'd4: big_char_lut = bcd_char(rt_d1);
-                4'd5: big_char_lut = bcd_char(rt_d0);
-                4'd6: big_char_lut = CH_M;
-                4'd7: big_char_lut = CH_S;
+                5'd0: big_char_lut = CH_CHECK;
+                5'd1: big_char_lut = CH_SPACE;
+                5'd2: big_char_lut = bcd_char(rt_d3);
+                5'd3: big_char_lut = bcd_char(rt_d2);
+                5'd4: big_char_lut = bcd_char(rt_d1);
+                5'd5: big_char_lut = bcd_char(rt_d0);
+                5'd6: big_char_lut = CH_M;
+                5'd7: big_char_lut = CH_S;
                 default: big_char_lut = CH_SPACE;
             endcase
         end
 
-        // ------------- INCORRECT: red X -------------
+        // ===================================================================
+        // INCORRECT: red X + reaction time
+        // ===================================================================
         else if (st_incorrect) begin
             big_active = 1'b1;
-            big_nchars = 4'd8;
+            big_nchars = 5'd8;
             big_ox     = 10'd320 - (8*32)/2;
             big_oy     = 10'd200;
             big_color  = C_RED;
             case (big_cell)
-                4'd0: big_char_lut = CH_XMARK;
-                4'd1: big_char_lut = CH_SPACE;
-                4'd2: big_char_lut = bcd_char(rt_d3);
-                4'd3: big_char_lut = bcd_char(rt_d2);
-                4'd4: big_char_lut = bcd_char(rt_d1);
-                4'd5: big_char_lut = bcd_char(rt_d0);
-                4'd6: big_char_lut = CH_M;
-                4'd7: big_char_lut = CH_S;
+                5'd0: big_char_lut = CH_XMARK;
+                5'd1: big_char_lut = CH_SPACE;
+                5'd2: big_char_lut = bcd_char(rt_d3);
+                5'd3: big_char_lut = bcd_char(rt_d2);
+                5'd4: big_char_lut = bcd_char(rt_d1);
+                5'd5: big_char_lut = bcd_char(rt_d0);
+                5'd6: big_char_lut = CH_M;
+                5'd7: big_char_lut = CH_S;
                 default: big_char_lut = CH_SPACE;
             endcase
         end
 
-        // ------------- SCORE (single-cycle bookkeeping): just blank -------------
-        // The SCORE state is one cycle long, so the user never sees it; we
-        // leave the screen blank (background color).
+        // SCORE state is one cycle long; user never sees it -> blank (defaults)
     end
 
     // -------------- Pick which (big or small) glyph this pixel is in --------------

@@ -13,6 +13,12 @@ create_clock -period 10.000 -name sys_clk_pin -waveform {0.000 5.000} -add [get_
 ## --- Reset: SW0 (slide switch, active high) --------------------------------
 set_property -dict {PACKAGE_PIN J15 IOSTANDARD LVCMOS33} [get_ports reset]
 
+## --- Mode / option switches -----------------------------------------------
+## sw[1] = SW1 (L16) -> adaptive-mode select (high = adaptive, low = classic)
+## sw[0] = SW2 (M13) -> reserved for future use; safely defaults to 0 when down
+set_property -dict {PACKAGE_PIN M13 IOSTANDARD LVCMOS33} [get_ports {sw[0]}]
+set_property -dict {PACKAGE_PIN L16 IOSTANDARD LVCMOS33} [get_ports {sw[1]}]
+
 ## --- Pushbuttons: BTNC / BTNU / BTNL / BTNR / BTND --------------------------
 set_property -dict {PACKAGE_PIN N17 IOSTANDARD LVCMOS33} [get_ports btnc]
 set_property -dict {PACKAGE_PIN M18 IOSTANDARD LVCMOS33} [get_ports btnu]

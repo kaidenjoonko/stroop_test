@@ -7,6 +7,7 @@
 //
 // We support a SUBSET of characters (just what the game actually renders):
 //   Letters needed by the words/menus: R E D G N B L U Y O W T S P M A I
+//                                      F H V (added for instructions/results)
 //   Digits: 0..9
 //   Specials: space, '/', ':', check (from CHECK_CHAR), x (from X_CHAR), '?'
 //
@@ -290,6 +291,20 @@ module font_rom (
                 4'd12: data <= 8'b11111111;
                 default: data <= 8'h00;
             endcase
+            6'h06: case (row)   // F (top + middle bar, no bottom bar)
+                4'd2: data <= 8'b11111111;
+                4'd3: data <= 8'b11000000;
+                4'd4: data <= 8'b11000000;
+                4'd5: data <= 8'b11000000;
+                4'd6: data <= 8'b11111100;
+                4'd7: data <= 8'b11111100;
+                4'd8: data <= 8'b11000000;
+                4'd9: data <= 8'b11000000;
+                4'd10: data <= 8'b11000000;
+                4'd11: data <= 8'b11000000;
+                4'd12: data <= 8'b11000000;
+                default: data <= 8'h00;
+            endcase
             6'h07: case (row)   // G
                 4'd2: data <= 8'b00111100;
                 4'd3: data <= 8'b01100110;
@@ -302,6 +317,20 @@ module font_rom (
                 4'd10: data <= 8'b11000011;
                 4'd11: data <= 8'b01100110;
                 4'd12: data <= 8'b00111100;
+                default: data <= 8'h00;
+            endcase
+            6'h08: case (row)   // H (two verticals + middle bar)
+                4'd2: data <= 8'b11000011;
+                4'd3: data <= 8'b11000011;
+                4'd4: data <= 8'b11000011;
+                4'd5: data <= 8'b11000011;
+                4'd6: data <= 8'b11111111;
+                4'd7: data <= 8'b11111111;
+                4'd8: data <= 8'b11000011;
+                4'd9: data <= 8'b11000011;
+                4'd10: data <= 8'b11000011;
+                4'd11: data <= 8'b11000011;
+                4'd12: data <= 8'b11000011;
                 default: data <= 8'h00;
             endcase
             6'h09: case (row)   // I
@@ -442,6 +471,20 @@ module font_rom (
                 4'd10: data <= 8'b11000011;
                 4'd11: data <= 8'b01100110;
                 4'd12: data <= 8'b00111100;
+                default: data <= 8'h00;
+            endcase
+            6'h16: case (row)   // V (two diagonals meeting at bottom)
+                4'd2: data <= 8'b11000011;
+                4'd3: data <= 8'b11000011;
+                4'd4: data <= 8'b11000011;
+                4'd5: data <= 8'b11000011;
+                4'd6: data <= 8'b11000011;
+                4'd7: data <= 8'b01100110;
+                4'd8: data <= 8'b01100110;
+                4'd9: data <= 8'b01100110;
+                4'd10: data <= 8'b00111100;
+                4'd11: data <= 8'b00111100;
+                4'd12: data <= 8'b00011000;
                 default: data <= 8'h00;
             endcase
             6'h17: case (row)   // W

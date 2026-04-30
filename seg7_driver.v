@@ -13,8 +13,17 @@
 //   an[7..4] -> SCORE      : displayed as 4-digit decimal (0..20 in practice)
 //   an[3..0] -> REACT_TIME : displayed as 4-digit decimal milliseconds (0..3000)
 //
-// BCD conversion uses a simple combinational divide-by-10 chain. For 16-bit
-// inputs (max 65535 -> 5 digits) this is small and meets timing easily.
+// TIMING FIX (Option A from the spec):
+//   The original combinational divide-by-10 chains made the BCD path the
+//   critical path of the design (WNS = -2.27 ns at 100 MHz). The fix is to
+//   sandwich each chain between flip-flops:
+//       score_val ----> [reg] ----> /10 chain ----> [reg] ----> mux/encode
+//   That registers both the inputs AND the outputs of the divider, breaking
+//   the long combinational path into two short pipeline stages. Worst-case
+//   path is now just the 16->4 divide-and-mod cone (a few LUT levels).
+//
+//   Functional cost: BCD digits trail score_val/time_val by 2 clocks, which
+//   is invisible to the user (20 ns vs ~125 Hz refresh rate).
 //==============================================================================
 
 `timescale 1ns / 1ps
@@ -31,23 +40,46 @@ module seg7_driver (
 
     assign dp = 1'b1;   // active-low: 1 = off
 
-    // ---------------- BCD conversion (combinational) ----------------
-    // Splits score_val and time_val into 4 BCD digits each.
-    wire [3:0] s_d0 =  score_val        % 10;
-    wire [3:0] s_d1 = (score_val / 10)  % 10;
-    wire [3:0] s_d2 = (score_val / 100) % 10;
-    wire [3:0] s_d3 = (score_val / 1000)% 10;
+    // ---------------- Registered inputs ----------------
+    // First pipeline stage: latch the values once per clock.
+    reg [15:0] score_r, time_r;
+    always @(posedge clk) begin
+        if (reset) begin
+            score_r <= 16'd0;
+            time_r  <= 16'd0;
+        end else begin
+            score_r <= score_val;
+            time_r  <= time_val;
+        end
+    end
 
-    wire [3:0] t_d0 =  time_val         % 10;
-    wire [3:0] t_d1 = (time_val / 10)   % 10;
-    wire [3:0] t_d2 = (time_val / 100)  % 10;
-    wire [3:0] t_d3 = (time_val / 1000) % 10;
+    // ---------------- Registered BCD digits ----------------
+    // Second pipeline stage: registered output of the /10 chain.
+    // The combinational %10 / /10 cone now sits between two flop layers,
+    // so its delay no longer affects the 100 MHz timing closure.
+    reg [3:0] s_d0, s_d1, s_d2, s_d3;
+    reg [3:0] t_d0, t_d1, t_d2, t_d3;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            s_d0 <= 4'd0; s_d1 <= 4'd0; s_d2 <= 4'd0; s_d3 <= 4'd0;
+            t_d0 <= 4'd0; t_d1 <= 4'd0; t_d2 <= 4'd0; t_d3 <= 4'd0;
+        end else begin
+            s_d0 <=  score_r        % 10;
+            s_d1 <= (score_r / 10)  % 10;
+            s_d2 <= (score_r / 100) % 10;
+            s_d3 <= (score_r / 1000)% 10;
+            t_d0 <=  time_r         % 10;
+            t_d1 <= (time_r / 10)   % 10;
+            t_d2 <= (time_r / 100)  % 10;
+            t_d3 <= (time_r / 1000) % 10;
+        end
+    end
 
     // ---------------- Refresh counter ----------------
     // We use the upper 3 bits of an 18-bit counter to select the active digit,
     // giving each digit ~2.62 ms of on-time (refresh = 100 MHz / 2^18 ~ 381 Hz
-    // per digit, total frame ~48 Hz which is fine; bump width for slower if
-    // needed). Width 18 is a common textbook value.
+    // per digit, total frame ~48 Hz which is fine).
     reg [17:0] refresh_cnt;
     always @(posedge clk) begin
         if (reset) refresh_cnt <= 18'd0;
@@ -56,7 +88,6 @@ module seg7_driver (
     wire [2:0] digit_sel = refresh_cnt[17:15];
 
     // ---------------- Anode + digit MUX ----------------
-    // Active LOW: drive a single bit low to enable that digit.
     reg [3:0] cur_digit;
     always @(*) begin
         case (digit_sel)
@@ -73,8 +104,6 @@ module seg7_driver (
     end
 
     // ---------------- Hex/BCD digit -> segment encoding ----------------
-    // seg = {a,b,c,d,e,f,g}, ACTIVE LOW (0 = lit). Patterns are the standard
-    // 7-segment glyphs for 0-9.
     always @(*) begin
         case (cur_digit)
             4'h0: seg = 7'b0000001;
