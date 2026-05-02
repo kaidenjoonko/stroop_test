@@ -1,30 +1,4 @@
-//==============================================================================
-// seg7_driver.v
-//------------------------------------------------------------------------------
-// 8-digit 7-segment display driver for the Nexys A7.
-//
-// Hardware notes for Nexys A7:
-//   - Both anodes (an[7:0]) and segments (seg[6:0], dp) are ACTIVE LOW.
-//   - Anodes select which digit is currently illuminated.
-//   - We multiplex at ~1 kHz per digit (refresh ~125 Hz total) so all 8 digits
-//     appear lit simultaneously to the human eye.
-//
-// Display layout (from leftmost an[7] to rightmost an[0]):
-//   an[7..4] -> SCORE      : displayed as 4-digit decimal (0..20 in practice)
-//   an[3..0] -> REACT_TIME : displayed as 4-digit decimal milliseconds (0..3000)
-//
-// TIMING FIX (Option A from the spec):
-//   The original combinational divide-by-10 chains made the BCD path the
-//   critical path of the design (WNS = -2.27 ns at 100 MHz). The fix is to
-//   sandwich each chain between flip-flops:
-//       score_val ----> [reg] ----> /10 chain ----> [reg] ----> mux/encode
-//   That registers both the inputs AND the outputs of the divider, breaking
-//   the long combinational path into two short pipeline stages. Worst-case
-//   path is now just the 16->4 divide-and-mod cone (a few LUT levels).
-//
-//   Functional cost: BCD digits trail score_val/time_val by 2 clocks, which
-//   is invisible to the user (20 ns vs ~125 Hz refresh rate).
-//==============================================================================
+// seg7_driver.v: 8-digit 7-segment display driver for the Nexys A7.
 
 `timescale 1ns / 1ps
 
@@ -40,8 +14,7 @@ module seg7_driver (
 
     assign dp = 1'b1;   // active-low: 1 = off
 
-    // ---------------- Registered inputs ----------------
-    // First pipeline stage: latch the values once per clock.
+    //  Registered inputs
     reg [15:0] score_r, time_r;
     always @(posedge clk) begin
         if (reset) begin
@@ -53,10 +26,7 @@ module seg7_driver (
         end
     end
 
-    // ---------------- Registered BCD digits ----------------
-    // Second pipeline stage: registered output of the /10 chain.
-    // The combinational %10 / /10 cone now sits between two flop layers,
-    // so its delay no longer affects the 100 MHz timing closure.
+    //  registered BCD digits
     reg [3:0] s_d0, s_d1, s_d2, s_d3;
     reg [3:0] t_d0, t_d1, t_d2, t_d3;
 
@@ -76,10 +46,7 @@ module seg7_driver (
         end
     end
 
-    // ---------------- Refresh counter ----------------
-    // We use the upper 3 bits of an 18-bit counter to select the active digit,
-    // giving each digit ~2.62 ms of on-time (refresh = 100 MHz / 2^18 ~ 381 Hz
-    // per digit, total frame ~48 Hz which is fine).
+    //  refresh counter
     reg [17:0] refresh_cnt;
     always @(posedge clk) begin
         if (reset) refresh_cnt <= 18'd0;
@@ -87,7 +54,7 @@ module seg7_driver (
     end
     wire [2:0] digit_sel = refresh_cnt[17:15];
 
-    // ---------------- Anode + digit MUX ----------------
+    //  anode + digit MUX 
     reg [3:0] cur_digit;
     always @(*) begin
         case (digit_sel)
@@ -103,7 +70,7 @@ module seg7_driver (
         endcase
     end
 
-    // ---------------- Hex/BCD digit -> segment encoding ----------------
+    // hex/BCD digit -> segment encoding
     always @(*) begin
         case (cur_digit)
             4'h0: seg = 7'b0000001;

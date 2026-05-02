@@ -1,27 +1,10 @@
-//==============================================================================
-// tb_stroop.v
-//------------------------------------------------------------------------------
-// Combined testbench for the Stroop Effect Game. Verifies:
-//   1. Reset behavior (FSM should land in IDLE).
-//   2. IDLE -> SHOW_WORD on BTNC.
-//   3. SHOW_WORD -> WAIT_INPUT after the 500 ms timer (we accelerate via force).
-//   4. LFSR always produces word != color.
-//   5. Correct answer transitions to CORRECT and increments the score.
-//   6. Wrong answer transitions to INCORRECT and leaves the score unchanged.
-//   7. 3 s timeout in WAIT_INPUT routes to INCORRECT.
-//   8. After 20 rounds, the FSM ends up back in IDLE with results_ready=1.
-//   9. VGA sync produces the expected 800x525 raster.
-//
-// Run (iverilog):
-//   iverilog -g2001 -o tb tb_stroop.v stroop_fsm.v lfsr.v vga_sync.v
-//   vvp tb
-//==============================================================================
+// tb_stroop.v: combined testbench for the stroop test
 
 `timescale 1ns / 1ps
 
 module tb_stroop;
 
-    // ---------------- Clock / reset ----------------
+    //  clock / reset 
     reg clk = 0;
     always #5 clk = ~clk;     // 100 MHz
 
@@ -30,7 +13,7 @@ module tb_stroop;
     reg [1:0] sw = 2'b00;     // sw[1]=0 -> classic mode (matches the
                               // original 12 assertions); sw[0] reserved.
 
-    // ---------------- DUT instances ----------------
+    //  DUT instances 
     wire        lfsr_sample;
     wire [1:0]  word_idx, color_idx;
 
@@ -45,7 +28,7 @@ module tb_stroop;
     wire [15:0] score_val, react_time_ms;
     wire [1:0]  cur_word, cur_color;
     wire        results_ready;
-    // New stat outputs (observed but not asserted on by the original 12).
+    //  stat outputs
     wire [15:0] best_rt, worst_rt, avg_rt;
     wire [15:0] cur_timeout_ms, min_timeout_ms;
     wire        adaptive_mode;
@@ -68,7 +51,7 @@ module tb_stroop;
         .adaptive_mode(adaptive_mode)
     );
 
-    // ---------------- Helpers ----------------
+    //  Helpers 
     integer pass = 0;
     integer fail = 0;
     task check;
@@ -105,14 +88,12 @@ module tb_stroop;
     // Run one full trial with the chosen outcome:
     //   outcome=0 -> answer correctly,
     //   outcome=1 -> answer wrong,
-    //   outcome=2 -> let it time out (3 s).
+    //   outcome=2 -> let it time out (3 s)
     task run_trial;
         input [1:0] outcome;
         reg [1:0] wrong_color;
         begin
-            // Give SHOW_WORD entry one clock so the LFSR can be sampled and
-            // cur_word/cur_color are updated, THEN fast-forward through the
-            // 500 ms timer.
+            // Give SHOW_WORD entry one clock so the LFSR can be sampled and cur_word/cur_color are updated, THEN fast-forward through the 500 ms timer
             wait (st_show);
             @(posedge clk);
             @(posedge clk);
@@ -125,19 +106,19 @@ module tb_stroop;
             case (outcome)
                 2'd0: press_color(cur_color);
                 2'd1: begin
-                    // Pick any color != cur_color.
+                    // pick any color != cur_color
                     wrong_color = (cur_color == 2'd0) ? 2'd1 : 2'd0;
                     press_color(wrong_color);
                 end
                 2'd2: begin
-                    // Force the 3 s timeout.
+                    // force the 3 s timeout
                     force dut.tmr = 29'd299_999_999;
                     @(posedge clk);
                     release dut.tmr;
                 end
             endcase
 
-            // Skip the 1 s feedback timer.
+            // skip the 1 s feedback timer
             wait (st_correct || st_incorrect);
             @(posedge clk);
             @(posedge clk);
@@ -149,7 +130,7 @@ module tb_stroop;
         end
     endtask
 
-    // ---------------- Test sequence ----------------
+    //  test sequence 
     integer i;
     initial begin
         repeat (5) @(posedge clk);
@@ -207,15 +188,14 @@ module tb_stroop;
         wait (st_score);
         @(posedge clk);
 
-        // We've completed rounds 0 and 1. Run 18 more.
+        // round 0 and 1 complete Run 18 more.
         for (i = 0; i < 18; i = i + 1) begin
             wait (st_show);
             run_trial(2'd0);  // all correct from here
             $display("  trial %0d done: score=%0d round=%0d", i, score_val, round_num);
         end
 
-        // After round 19's SCORE state, the FSM should head back to IDLE
-        // with results_ready=1.
+        // after round 19's SCORE state, the FSM should head back to IDLE with results_ready=1
         wait (st_idle);
         check(results_ready, "After 20 rounds: results_ready=1");
         $display("Final score = %0d (round_num=%0d)", score_val, round_num);
@@ -234,7 +214,7 @@ module tb_stroop;
         $finish;
     end
 
-    // Watchdog: kill the sim if it ever runs away.
+    // Watchdog: kill the sim if it ever runs away
     initial begin
         #2_000_000_000;
         $display("TIMEOUT");

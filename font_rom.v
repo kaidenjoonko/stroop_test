@@ -1,23 +1,4 @@
-//==============================================================================
-// font_rom.v
-//------------------------------------------------------------------------------
-// 8x16 bitmapped font ROM. Each character is 8 pixels wide and 16 rows tall.
-// Address layout: addr = {char_code[5:0], row[3:0]} -> 10-bit address, 1024
-// entries x 8-bit data. Bit 7 of the data is the leftmost pixel (1 = lit).
-//
-// We support a SUBSET of characters (just what the game actually renders):
-//   Letters needed by the words/menus: R E D G N B L U Y O W T S P M A I
-//                                      F H V (added for instructions/results)
-//   Digits: 0..9
-//   Specials: space, '/', ':', check (from CHECK_CHAR), x (from X_CHAR), '?'
-//
-// The character codes used here are the lower 6 bits of ASCII for letters/
-// digits/punctuation (A='A' & 6'h3F = 6'h01, etc.) PLUS two custom codes for
-// the check mark and X feedback glyphs at 6'h3E and 6'h3F.
-//
-// Any unsupported address returns 0 (blank pixels), so unsupported glyphs
-// show as empty rectangles -- safe and harmless.
-//==============================================================================
+// font_rom.v: front end for 8x16 pixel map
 
 `timescale 1ns / 1ps
 
@@ -27,23 +8,22 @@ module font_rom (
     output reg  [7:0]  data
 );
 
-    // Custom glyph codes (above the printable-ASCII subset we use)
-    // 6'h3E = check mark, 6'h3F = X mark
-    localparam GLYPH_CHECK = 6'h3E;
-    localparam GLYPH_XMARK = 6'h3F;
+    // we used custom glyph codes (above the printable-ASCII subset we use)
+    localparam GLYPH_CHECK = 6'h3E; //check mark
+    localparam GLYPH_XMARK = 6'h3F; //X Mark
 
     wire [5:0] ch  = addr[9:4];
     wire [3:0] row = addr[3:0];
 
-    // Output is registered (synchronous read) to map to BRAM cleanly.
+    // output is registered (synchronous read) to map to BRAM
     always @(posedge clk) begin
         data <= 8'h00;
         case (ch)
 
-            // -------- Space (' ' = 6'h20 -> & 3F = 6'h20) --------
+            //space
             6'h20: data <= 8'h00;
 
-            // -------- '/' = 6'h2F & 3F = 6'h2F --------
+            // forward slash
             6'h2F: case (row)
                 4'd2: data <= 8'b00000010;
                 4'd3: data <= 8'b00000110;
@@ -59,23 +39,22 @@ module font_rom (
                 default: data <= 8'h00;
             endcase
 
-            // -------- ':' = 6'h3A & 3F = 6'h3A --------
+            // semicolon
             6'h3A: case (row)
                 4'd4,4'd5: data <= 8'b00011000;
                 4'd11,4'd12: data <= 8'b00011000;
                 default: data <= 8'h00;
             endcase
 
-            // -------- '?' = 6'h3F ... but we use 3F for X-mark.
-            // Use ASCII '!' (6'h21) as a stand-in if we ever need it.
+            // question mark
+            // exclamation mark
             6'h21: case (row)
                 4'd2,4'd3,4'd4,4'd5,4'd6,4'd7,4'd8: data <= 8'b00011000;
                 4'd11,4'd12: data <= 8'b00011000;
                 default: data <= 8'h00;
             endcase
 
-            // ===================== DIGITS 0-9 =====================
-            // Codes 6'h30..6'h39
+            // digits 0-9
             6'h30: case (row)   // 0
                 4'd2: data <= 8'b00111100;
                 4'd3: data <= 8'b01100110;
@@ -217,10 +196,8 @@ module font_rom (
                 default: data <= 8'h00;
             endcase
 
-            // ===================== UPPERCASE LETTERS =====================
-            // Codes 6'h01..6'h1A correspond to 'A'..'Z' & 6'h3F.
-            // ('A' = 0x41, 0x41 & 0x3F = 0x01)
-
+    
+            //uppercase letters A-Z
             6'h01: case (row)   // A
                 4'd2: data <= 8'b00111100;
                 4'd3: data <= 8'b01100110;
@@ -291,7 +268,7 @@ module font_rom (
                 4'd12: data <= 8'b11111111;
                 default: data <= 8'h00;
             endcase
-            6'h06: case (row)   // F (top + middle bar, no bottom bar)
+            6'h06: case (row)   // F
                 4'd2: data <= 8'b11111111;
                 4'd3: data <= 8'b11000000;
                 4'd4: data <= 8'b11000000;
@@ -319,7 +296,7 @@ module font_rom (
                 4'd12: data <= 8'b00111100;
                 default: data <= 8'h00;
             endcase
-            6'h08: case (row)   // H (two verticals + middle bar)
+            6'h08: case (row)   // H
                 4'd2: data <= 8'b11000011;
                 4'd3: data <= 8'b11000011;
                 4'd4: data <= 8'b11000011;
@@ -473,7 +450,7 @@ module font_rom (
                 4'd12: data <= 8'b00111100;
                 default: data <= 8'h00;
             endcase
-            6'h16: case (row)   // V (two diagonals meeting at bottom)
+            6'h16: case (row)   // V 
                 4'd2: data <= 8'b11000011;
                 4'd3: data <= 8'b11000011;
                 4'd4: data <= 8'b11000011;
@@ -516,8 +493,8 @@ module font_rom (
                 default: data <= 8'h00;
             endcase
 
-            // ===================== CUSTOM GLYPHS =====================
-            6'h3E: case (row)   // CHECKMARK ✓
+            // custom glyphs
+            6'h3E: case (row)   // checkmark
                 4'd6: data <= 8'b00000011;
                 4'd7: data <= 8'b00000111;
                 4'd8: data <= 8'b11001110;
@@ -526,7 +503,7 @@ module font_rom (
                 4'd11: data <= 8'b00110000;
                 default: data <= 8'h00;
             endcase
-            6'h3F: case (row)   // X-MARK ✗
+            6'h3F: case (row)   // x mark
                 4'd3: data <= 8'b11000011;
                 4'd4: data <= 8'b11100111;
                 4'd5: data <= 8'b01111110;

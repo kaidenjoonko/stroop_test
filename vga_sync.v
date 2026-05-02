@@ -1,21 +1,4 @@
-//==============================================================================
-// vga_sync.v
-//------------------------------------------------------------------------------
-// VGA 640x480 @ 60Hz timing controller.
-//
-// Standard VGA timing (industry reference):
-//   Pixel clock = 25.175 MHz  (we use 25 MHz, well within monitor tolerance)
-//   Horizontal: 640 visible + 16 front porch + 96 sync + 48 back porch = 800
-//   Vertical:   480 visible + 10 front porch +  2 sync + 33 back porch = 525
-//   Frame rate = 25e6 / (800 * 525) = 59.52 Hz  (acceptable, monitors lock fine)
-//
-// Sync polarity for 640x480@60: HSYNC and VSYNC are both ACTIVE LOW.
-//
-// We derive the 25 MHz pixel clock from the 100 MHz system clock by toggling
-// a divide-by-2 register twice (i.e. a 2-bit counter, take bit[1] as pclk_en
-// every other cycle). To stay synchronous, we use a one-cycle pixel-tick enable
-// rather than gating the clock. All counters advance only when pix_tick=1.
-//==============================================================================
+// vga_sync.v: VGA 640x480 @ 60Hz timing controller
 
 `timescale 1ns / 1ps
 
@@ -30,7 +13,7 @@ module vga_sync (
     output wire [9:0]  vcount         // 0..524
 );
 
-    // ---------------- Horizontal/Vertical timing constants ----------------
+    // horizontal/vertical timing constants
     localparam H_DISPLAY     = 640;
     localparam H_FRONT_PORCH = 16;
     localparam H_SYNC_PULSE  = 96;
@@ -43,9 +26,7 @@ module vga_sync (
     localparam V_BACK_PORCH  = 33;
     localparam V_TOTAL       = 525;
 
-    // ---------------- 100 MHz -> 25 MHz pixel-tick ----------------
-    // A 2-bit counter rolls over every 4 cycles of the 100 MHz clock,
-    // giving us a one-cycle-wide enable pulse at exactly 25 MHz.
+    //  100 MHz -> 25 MHz pixel-tick
     reg [1:0] pix_div = 2'b00;
     always @(posedge clk_100mhz) begin
         if (reset) pix_div <= 2'b00;
@@ -53,7 +34,7 @@ module vga_sync (
     end
     assign p_tick = (pix_div == 2'b11);
 
-    // ---------------- Horizontal counter ----------------
+    // horizontal counter
     reg [9:0] h_cnt = 10'd0;
     always @(posedge clk_100mhz) begin
         if (reset)
@@ -64,7 +45,7 @@ module vga_sync (
         end
     end
 
-    // ---------------- Vertical counter (advances at end of each line) ----------------
+    // vertical counter
     reg [9:0] v_cnt = 10'd0;
     always @(posedge clk_100mhz) begin
         if (reset)
@@ -75,9 +56,7 @@ module vga_sync (
         end
     end
 
-    // ---------------- Sync pulse generation (active LOW) ----------------
-    // HSYNC pulses during the H_SYNC_PULSE window which begins after the
-    // visible region + front porch. Same idea for VSYNC vertically.
+    //  sync pulse generation (active LOW)
     wire hsync_active = (h_cnt >= (H_DISPLAY + H_FRONT_PORCH)) &&
                         (h_cnt <  (H_DISPLAY + H_FRONT_PORCH + H_SYNC_PULSE));
     wire vsync_active = (v_cnt >= (V_DISPLAY + V_FRONT_PORCH)) &&

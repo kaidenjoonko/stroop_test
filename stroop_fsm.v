@@ -1,53 +1,5 @@
-//==============================================================================
-// stroop_fsm.v
-//------------------------------------------------------------------------------
-// Six-state Moore FSM, ONE-HOT encoded, for the Stroop reaction-time game.
-//
-// States:
-//   IDLE      : Title screen. Wait for BTNC. Score, round, timers all reset.
-//   SHOW_WORD : Display the word for 300 ms while LFSR is sampled (once at
-//               state entry). VGA renders the word in the mismatched ink color.
-//   WAIT_INPUT: Up to cur_timeout_cycles. Reaction-time counter ticks every
-//               ms. As soon as any color button is pressed, decide CORRECT vs
-//               INCORRECT. If the timeout elapses with no press, treat as
-//               INCORRECT.
-//   CORRECT   : Flash green check for 600 ms. Increment score. Latch reaction
-//               time. Update stats (best/worst/total).
-//   INCORRECT : Flash red X for 600 ms. No score change.
-//   SCORE     : One-cycle housekeeping state: bump round counter, then go
-//               back to SHOW_WORD if more rounds remain, else back to IDLE
-//               (results).
-//
-// Timing constants (all derived from 100 MHz clk):
-//   1 ms tick      = 100,000 cycles
-//   300 ms (SHOW)  = 30,000,000 cycles
-//   600 ms (FB)    = 60,000,000 cycles
-//   3 s   (init T) = 300,000,000 cycles  -> needs 29-bit counter
-//   200 ms (step)  = 20,000,000 cycles
-//   500 ms (floor) = 50,000,000 cycles
-//   5 s   (cap)    = 500,000,000 cycles  (still fits in 29 bits)
-//
-// Modes (sw[1]):
-//   0 = Classic: 20 trials, fixed 3 s timeout.
-//   1 = Adaptive: timeout shrinks by 200 ms after every 3 correct in a row,
-//       grows by 200 ms after every wrong. Game ends after 30 trials OR
-//       3 wrong in a row, whichever comes first.
-//
-// Stats (correct trials only, cleared on reset and on BTNC in IDLE):
-//   best_rt       : minimum reaction time (sentinel 16'hFFFF when no data)
-//   worst_rt      : maximum reaction time
-//   total_rt      : 20-bit running sum (max ~30*5000 = 150000)
-//   avg_rt        : computed once at end-of-session by a 21-cycle sequential
-//                   restoring divider so the long div path doesn't sit on the
-//                   critical path of the 100 MHz clock.
-//   min_timeout_ms: lowest cur_timeout_ms reached this session (adaptive only).
-//
-// Button-to-color mapping:
-//   BTNU -> RED    (color 0)
-//   BTNR -> GREEN  (color 1)
-//   BTND -> BLUE   (color 2)
-//   BTNL -> YELLOW (color 3)
-//==============================================================================
+// stroop_fsm.v: six-state Moore FSM, ONE-HOT encoded, for the Stroop reaction-time game
+
 
 `timescale 1ns / 1ps
 

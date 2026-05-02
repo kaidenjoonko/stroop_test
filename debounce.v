@@ -1,19 +1,4 @@
-//==============================================================================
-// debounce.v
-//------------------------------------------------------------------------------
-// Counter-based debouncer with a synchronizer and rising-edge detector.
-//
-// Strategy:
-//   1) Two-flop synchronizer (metastability protection on async button input).
-//   2) Saturating counter: increments while the synchronized input is high,
-//      decrements while low. The "stable" output flips only when the counter
-//      reaches its max or min, so transient glitches shorter than the debounce
-//      period are rejected.
-//   3) Rising-edge detect on the stable output produces a single-cycle pulse.
-//
-// At 100 MHz with COUNT_MAX = 1_000_000 we get a ~10 ms debounce window, which
-// is the standard textbook value for mechanical pushbuttons.
-//==============================================================================
+// debounce.v: counter-based debouncer with a synchronizer and rising-edge detector
 
 `timescale 1ns / 1ps
 
@@ -27,7 +12,7 @@ module debounce #(
     output wire btn_pulse   // 1-cycle pulse on rising edge of btn_stable
 );
 
-    // ---------------- 2-flop synchronizer ----------------
+    // 2-flop synchronizer
     reg sync_0, sync_1;
     always @(posedge clk) begin
         if (reset) begin
@@ -39,9 +24,7 @@ module debounce #(
         end
     end
 
-    // ---------------- Saturating counter ----------------
-    // Width must be wide enough to hold COUNT_MAX. We size it to 20 bits which
-    // covers up to ~1 million; for larger COUNT_MAX increase the width below.
+    //counter system (up to 20 points)
     reg [19:0] cnt;
     always @(posedge clk) begin
         if (reset) begin
@@ -49,12 +32,11 @@ module debounce #(
             btn_stable <= 1'b0;
         end else begin
             if (sync_1 == btn_stable) begin
-                // input matches current stable level -> reset counter
+                //reset
                 cnt <= 20'd0;
             end else begin
-                // input differs -> count toward the threshold
                 if (cnt == COUNT_MAX-1) begin
-                    btn_stable <= sync_1;   // accept new level
+                    btn_stable <= sync_1;
                     cnt        <= 20'd0;
                 end else begin
                     cnt <= cnt + 1'b1;
@@ -63,7 +45,7 @@ module debounce #(
         end
     end
 
-    // ---------------- Rising-edge detect ----------------
+    // detech rising edge
     reg btn_stable_d;
     always @(posedge clk) begin
         if (reset) btn_stable_d <= 1'b0;

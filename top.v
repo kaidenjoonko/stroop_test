@@ -1,24 +1,5 @@
-//==============================================================================
-// top.v
-//------------------------------------------------------------------------------
-// Top-level integration module for the Stroop Effect Game on the Nexys A7.
-//
-// Pin summary (see nexys_a7.xdc for the constraints):
-//   clk       : 100 MHz crystal (E3)
-//   reset     : SW0 (active high)  - synchronous reset to all submodules
-//   sw[1:0]   : two slide switches  -- sw[1]=adaptive mode, sw[0]=reserved
-//   btnc      : center pushbutton (start/confirm)
-//   btnu      : up    pushbutton (RED)
-//   btnr      : right pushbutton (GREEN)
-//   btnd      : down  pushbutton (BLUE)
-//   btnl      : left  pushbutton (YELLOW)
-//   vga_r,g,b : 4 bits each, 12-bit color out to VGA connector
-//   vga_hs    : horizontal sync
-//   vga_vs    : vertical sync
-//   seg[6:0]  : 7-segment cathodes (active LOW)
-//   dp        : decimal point (held high = off)
-//   an[7:0]   : digit anodes (active LOW, multiplexed)
-//==============================================================================
+// top.v: top-level integration module for the Stroop Effect Game on the Nexys A7.
+
 
 `timescale 1ns / 1ps
 
@@ -43,9 +24,8 @@ module top (
     output wire [7:0]  an
 );
 
-    // ============================================================
-    // 1. Synchronize external reset
-    // ============================================================
+  
+    // 1. synchronize external reset
     reg rst_s0, rst_s1;
     always @(posedge clk) begin
         rst_s0 <= reset;
@@ -53,8 +33,7 @@ module top (
     end
     wire rst = rst_s1;
 
-    // Two-flop synchronizer for the slide switches as well -- they're
-    // mechanical, asynchronous, and feed combinational paths in the FSM.
+    
     reg [1:0] sw_s0, sw_s1;
     always @(posedge clk) begin
         sw_s0 <= sw;
@@ -62,9 +41,8 @@ module top (
     end
     wire [1:0] sw_sync = sw_s1;
 
-    // ============================================================
-    // 2. Debounce + edge-detect all five pushbuttons
-    // ============================================================
+   
+    // 2. debounce + edge-detect all five pushbuttons
     wire btnc_stable, btnc_p;
     wire btnu_stable, btnu_p;
     wire btnr_stable, btnr_p;
@@ -77,9 +55,8 @@ module top (
     debounce u_db_d (.clk(clk), .reset(rst), .btn_in(btnd), .btn_stable(btnd_stable), .btn_pulse(btnd_p));
     debounce u_db_l (.clk(clk), .reset(rst), .btn_in(btnl), .btn_stable(btnl_stable), .btn_pulse(btnl_p));
 
-    // ============================================================
+ 
     // 3. LFSR (free-running, sampled by FSM)
-    // ============================================================
     wire        lfsr_sample;
     wire [1:0]  word_idx, color_idx;
     lfsr u_lfsr (
@@ -90,9 +67,7 @@ module top (
         .color_idx(color_idx)
     );
 
-    // ============================================================
     // 4. Game FSM
-    // ============================================================
     wire        st_idle, st_show, st_wait, st_correct, st_incorrect, st_score;
     wire [4:0]  round_num;
     wire [15:0] score_val, react_time_ms;
@@ -134,9 +109,8 @@ module top (
         .adaptive_mode (adaptive_mode)
     );
 
-    // ============================================================
+   
     // 5. VGA timing generator
-    // ============================================================
     wire        video_on, p_tick;
     wire [9:0]  hcount, vcount;
 
@@ -151,9 +125,7 @@ module top (
         .vcount     (vcount)
     );
 
-    // ============================================================
-    // 6. Pixel generator (renders the active screen)
-    // ============================================================
+    //6. pixel generator
     wire [11:0] rgb;
 
     pixel_gen u_pix (
@@ -183,14 +155,12 @@ module top (
         .rgb           (rgb)
     );
 
-    // Map 12-bit RGB to the three 4-bit VGA buses
+    // map 12-bit RGB to the three 4-bit VGA buses
     assign vga_r = rgb[11:8];
     assign vga_g = rgb[7:4];
     assign vga_b = rgb[3:0];
 
-    // ============================================================
     // 7. 7-segment display driver
-    // ============================================================
     seg7_driver u_seg7 (
         .clk        (clk),
         .reset      (rst),

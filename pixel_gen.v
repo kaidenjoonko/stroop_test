@@ -1,61 +1,4 @@
-//==============================================================================
-// pixel_gen.v
-//------------------------------------------------------------------------------
-// Composes the VGA pixel stream depending on the current FSM state and game
-// data. Renders five distinct screens:
-//
-//   1) IDLE / Title (results_ready=0)  -- multi-line instructions:
-//                           BIG  "STROOP TEST"  (y=60)
-//                           sm   "IDENTIFY THE INK COLOR"  (y=140)
-//                           sm   "NOT THE WORD"            (y=180)
-//                           sm   "BTNU : RED  BTNR : GREEN"  (y=240)
-//                           sm   "BTND : BLUE  BTNL : YELLOW"(y=280)
-//                           sm   "SW1 UP : ADAPTIVE MODE"   (y=340)
-//                           sm   "PRESS BTNC TO START"      (y=400)
-//   2) IDLE / Results (results_ready=1) -- session statistics:
-//                           BIG  "RESULTS"      (y=60)
-//                           sm   SCORE / TRIALS line          (y=160)
-//                           sm   AVG TIME line                (y=200)
-//                           sm   BEST TIME line               (y=240)
-//                           sm   WORST TIME line              (y=280)
-//                           sm   MIN TIMEOUT line (adaptive)  (y=320)
-//                           sm   "PRESS BTNC TO RESTART"      (y=400)
-//   3) SHOW_WORD/WAIT     -- trial:
-//                           BIG  word (mismatched ink)   (y=200)
-//                           sm   "ROUND NN/20" or "/30"  top-left (y=20)
-//                           sm   "TIMEOUT: NNNNMS"       top-right (y=20)
-//   4) CORRECT            -- giant green check + reaction time
-//   5) INCORRECT          -- giant red X    + reaction time
-//
-// All glyphs use a SCALE factor so the 8x16 source font is enlarged uniformly.
-// SCALE=4 -> 32x64 ("BIG" strings).  SCALE=2 -> 16x32 ("small" strings).
-//
-// Multi-line screens are realized with a single big-string slot and a single
-// small-string slot whose origin/length/character lookup are selected from a
-// chain of py-zone (and occasionally px-zone) comparators inside the layout
-// always block. Only one zone fires per pixel, so the whole screen still
-// renders with one big_char_lut and one sm_char_lut.
-//
-// Performance / timing fix:
-//   The combinational divide-by-1000/100/10 chains for the BCD breakouts
-//   (sc_d3..d0, rt_d3..d0, avg, best, worst, cur_timeout, min_timeout) used
-//   to be a single 16-bit value -> ~3 chained dividers in the same cycle,
-//   with the result feeding the case statement that drives the font ROM
-//   address. That was the WNS=-2.27 ns critical path. We now register the
-//   16-bit input first (one cycle), then register the four BCD digits
-//   (a second cycle), then use the registered digits in the layout block.
-//   Total latency from FSM update to glyph: 2 clocks (~20 ns) -- invisible
-//   at 60 Hz refresh.
-//
-// Color encoding (12-bit RGB, 4 bits/channel):
-//   RED    = 12'hF00
-//   GREEN  = 12'h2C5
-//   BLUE   = 12'h35F
-//   YELLOW = 12'hFC0
-//   WHITE  = 12'hFFF
-//   GREY   = 12'h888
-//   BLACK  = 12'h000  (background)
-//==============================================================================
+// pixel_gen.v : generates RGB pixel stream for VGA output based on FSM state and game data
 
 `timescale 1ns / 1ps
 
@@ -74,7 +17,7 @@ module pixel_gen (
     input  wire        st_incorrect,
     input  wire        st_score,
 
-    // Game data
+    // game data
     input  wire [1:0]  cur_word,        // 0=RED 1=GREEN 2=BLUE 3=YELLOW
     input  wire [1:0]  cur_color,
     input  wire [4:0]  round_num,       // 0..29 (adaptive) or 0..19 (classic)
@@ -82,7 +25,7 @@ module pixel_gen (
     input  wire [15:0] react_time_ms,
     input  wire        results_ready,
 
-    // New: per-session stats and adaptive mode
+    // per-session stats and adaptive mode
     input  wire [15:0] best_rt,         // sentinel 16'hFFFF if no data
     input  wire [15:0] worst_rt,
     input  wire [15:0] avg_rt,
@@ -93,7 +36,7 @@ module pixel_gen (
     output reg  [11:0] rgb              // 12-bit color out
 );
 
-    // ---------------- Color palette ----------------
+    // Color palette 
     localparam [11:0] C_BLACK  = 12'h000;
     localparam [11:0] C_WHITE  = 12'hFFF;
     localparam [11:0] C_RED    = 12'hF00;
@@ -102,7 +45,6 @@ module pixel_gen (
     localparam [11:0] C_YELLOW = 12'hFC0;
     localparam [11:0] C_GREY   = 12'h888;
 
-    // Look up "ink color" from a 2-bit color code
     function [11:0] color_of;
         input [1:0] c;
         begin
@@ -116,11 +58,7 @@ module pixel_gen (
         end
     endfunction
 
-    // ---------------- Font ROM access ----------------
-    // The pixel_gen module computes a 6-bit character code and a 4-bit row
-    // for the GLYPH covering the current pixel. The font ROM returns the
-    // 8-pixel wide bitmap row, and we pick the column bit indexed by
-    // (pix_x - glyph_origin_x) >> SCALE.
+    //  font ROM access 
     reg  [5:0] rom_char;
     reg  [3:0] rom_row;
     wire [9:0] rom_addr = {rom_char, rom_row};
@@ -131,15 +69,12 @@ module pixel_gen (
         .data (rom_data)
     );
 
-    // Because rom_data is registered (1-cycle read latency), we delay the
-    // pixel-column index, requested glyph color, and fg/bg validity by one
-    // cycle so they line up with the data coming back from the ROM.
-    reg [2:0]  col_d1;     // which of the 8 glyph columns (post-scale)
+    reg [2:0]  col_d1;     // which of the 8 glyph columns
     reg [11:0] fg_col_d1;  // foreground color at this pixel
     reg [11:0] bg_col_d1;  // background color at this pixel
-    reg        in_glyph_d1; // 1 if this pixel falls inside any glyph cell
+    reg        in_glyph_d1;
 
-    // ---------------- Default values for outputs ----------------
+    // default values for outputs 
     reg [5:0]  target_char;
     reg [3:0]  target_row;
     reg [2:0]  target_col;
@@ -147,7 +82,7 @@ module pixel_gen (
     reg [11:0] target_bg;
     reg        target_in_glyph;
 
-    // ---------------- Letter codes (6-bit, == ASCII & 0x3F) ----------------
+    // letter codes (6-bit, == ASCII & 0x3F)
     localparam [5:0] CH_SPACE = 6'h20;
     localparam [5:0] CH_SLASH = 6'h2F;
     localparam [5:0] CH_COLON = 6'h3A;
@@ -164,7 +99,7 @@ module pixel_gen (
     localparam [5:0] CH_CHECK = 6'h3E;
     localparam [5:0] CH_XMARK = 6'h3F;
 
-    // Helper that converts a 4-bit BCD value to its character code
+    // helper that converts a 4-bit BCD value to its character code
     function [5:0] bcd_char;
         input [3:0] d;
         begin
@@ -172,16 +107,9 @@ module pixel_gen (
         end
     endfunction
 
-    // ===================================================================
-    //               BCD pipelining (timing-fix Option A)
-    // ===================================================================
-    // Stage 1: register the 16-bit data values. Stage 2: register the four
-    // /1000, /100, /10, %10 results. Each %10 //10 path is then a short
-    // combinational hop between two flip-flops, well under 10 ns.
-    //
-    // Note: best_rt may be its 'no-data' sentinel 16'hFFFF; we substitute 0
-    // at the input register so the BCD digits show 0000 rather than 6553.
+ 
 
+    // capture relevant game data
     reg [15:0] score_q,  react_q,  avg_q,  best_q,  worst_q,  ctmo_q,  mtmo_q;
 
     always @(posedge clk) begin
@@ -234,7 +162,7 @@ module pixel_gen (
     wire [3:0] rn_d1   = (rn_p1/10)%10;
     wire [3:0] rn_d0   =  rn_p1%10;
 
-    // ---------------- Word-text helper ----------------
+    // word-text helper
     function [5:0] word_letter;
         input [1:0] w;
         input [2:0] idx;     // 0..5
@@ -275,7 +203,7 @@ module pixel_gen (
         end
     endfunction
 
-    // Word lengths for centering
+    // word lengths for centering
     function [3:0] word_len;
         input [1:0] w;
         begin
@@ -289,32 +217,30 @@ module pixel_gen (
         end
     endfunction
 
-    // ===================================================================
-    //                    MAIN COMBINATIONAL DRAW LOGIC
-    // ===================================================================
+    //MAIN COMBINATIONAL BLOCK
 
-    // Local pixel coords
+    // local pixel coords
     wire [9:0] px = hcount;
     wire [9:0] py = vcount;
 
-    // ---------- Big rendering (scale 4): 32x64 per char ----------
+    // big rendering (scale 4): 32x64 per character
     reg [9:0]  big_ox;
     reg [9:0]  big_oy;
     reg [4:0]  big_nchars;
     reg [11:0] big_color;
     reg        big_active;
 
-    // ---------- small string (scale 2): 16x32 per char ----------
+    //  small string (scale 2): 16x32 per character
     reg [9:0]  sm_ox, sm_oy;
     reg [4:0]  sm_nchars;
     reg [11:0] sm_color;
     reg        sm_active;
 
-    // Per-cell character lookups
+    // per-cell character lookups
     reg [5:0] big_char_lut;
     reg [5:0] sm_char_lut;
 
-    // Index of the cell + col/row within cell
+    // index of the cell + col/row within cell
     reg [4:0] big_cell;
     reg [4:0] big_col_in_cell;   // 0..31
     reg [5:0] big_row_in_cell;   // 0..63
@@ -324,8 +250,7 @@ module pixel_gen (
 
     reg in_big, in_sm;
 
-    // Compute "in big string?" and indices.
-    // big_nchars*32 max = 31*32 = 992; subtract is on 10-bit px.
+    //compute
     always @(*) begin
         in_big = 1'b0;
         big_cell        = 5'd0;
@@ -362,7 +287,7 @@ module pixel_gen (
         end
     end
 
-    // ---------------- Per-state screen layout ----------------
+    //  per-state screen layout 
 
     always @(*) begin
         // defaults: nothing
@@ -380,12 +305,10 @@ module pixel_gen (
         sm_color     = C_GREY;
         sm_char_lut  = CH_SPACE;
 
-        // ===================================================================
-        // IDLE: title screen OR results screen
-        // ===================================================================
+        //IDLE: start screen, then results screen
         if (st_idle) begin
             if (results_ready) begin
-                // ---- RESULTS SCREEN ----
+                //  RESULTS SCREEN 
                 // BIG "RESULTS" header (7 chars)
                 big_active = 1'b1;
                 big_nchars = 5'd7;
@@ -403,7 +326,7 @@ module pixel_gen (
                     default: big_char_lut = CH_SPACE;
                 endcase
 
-                // ---- Stats lines (py-zone dispatch) ----
+                //  stats lines
 
                 // Line 1 @ y=160:  "SCORE: NN/20"  (classic) or "TRIALS: NN" (adaptive)
                 if (py >= 10'd160 && py < 10'd192) begin
@@ -601,7 +524,7 @@ module pixel_gen (
                 end
 
             end else begin
-                // ---- TITLE / INSTRUCTIONS SCREEN ----
+                // title instructino screen
 
                 // BIG "STROOP TEST" header at y=60
                 big_active = 1'b1;
@@ -825,9 +748,7 @@ module pixel_gen (
             end
         end
 
-        // ===================================================================
         // SHOW_WORD or WAIT_INPUT: trial screen
-        // ===================================================================
         else if (st_show || st_wait) begin
             // BIG word, mismatched ink color, centered at y=200
             big_active = 1'b1;
@@ -890,9 +811,7 @@ module pixel_gen (
             end
         end
 
-        // ===================================================================
         // CORRECT: green check + reaction time
-        // ===================================================================
         else if (st_correct) begin
             big_active = 1'b1;
             big_nchars = 5'd8;
@@ -912,9 +831,7 @@ module pixel_gen (
             endcase
         end
 
-        // ===================================================================
         // INCORRECT: red X + reaction time
-        // ===================================================================
         else if (st_incorrect) begin
             big_active = 1'b1;
             big_nchars = 5'd8;
@@ -934,11 +851,10 @@ module pixel_gen (
             endcase
         end
 
-        // SCORE state is one cycle long; user never sees it -> blank (defaults)
+        // SCORE state is one cycle long
     end
 
-    // -------------- Pick which (big or small) glyph this pixel is in --------------
-    // If both overlap (shouldn't happen if layouts are sane), big wins.
+    //  Pick which (big or small) glyph this pixel is in 
     always @(*) begin
         target_in_glyph = 1'b0;
         target_char     = CH_SPACE;
@@ -964,7 +880,7 @@ module pixel_gen (
         end
     end
 
-    // Drive font ROM address. Rom data appears 1 cycle later.
+    // drive font ROM address
     always @(posedge clk) begin
         rom_char    <= target_char;
         rom_row     <= target_row;
@@ -974,11 +890,10 @@ module pixel_gen (
         in_glyph_d1 <= target_in_glyph;
     end
 
-    // -------------- Combine ROM data with column index to pick pixel --------------
-    // Bit 7 of rom_data is the leftmost pixel of the glyph row.
+    // combine ROM data with column index to pick pixel
     wire pix_lit = rom_data[7 - col_d1];
 
-    // -------------- Final RGB output --------------
+    //  final RGB output
     always @(posedge clk) begin
         if (!video_on) begin
             rgb <= C_BLACK;
